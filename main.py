@@ -15,14 +15,13 @@ class UrnaBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # Sincroniza instantaneamente todos os comandos na árvore global do bot
-        commands_synced = await self.tree.sync()
-        print(f"✅ Sincronizados {len(commands_synced)} comandos de barra globalmente!")
+        synced = await self.tree.sync()
+        print(f"✅ Sincronizados {len(synced)} comandos de barra globalmente!")
 
 bot = UrnaBot()
 
 # -----------------------------------------------------------------------------
-# INTEGRAÇÃO SUPABASE (CHESSCOINS)
+# SISTEMA DE BANCO DE DADOS COMPARTILHADO (SUPABASE - CHESSCOINS)
 # -----------------------------------------------------------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -37,7 +36,7 @@ def obter_chesscoins(user_id: int) -> int:
             return res.data[0]["saldo"]
         return 0
     except Exception as e:
-        print(f"Erro ao ler saldo: {e}")
+        print(f"Erro ao ler saldo no Supabase: {e}")
         return 0
 
 def adicionar_chesscoins(user_id: int, quantia: int):
@@ -53,7 +52,7 @@ def adicionar_chesscoins(user_id: int, quantia: int):
         print(f"Erro ao salvar saldo no Supabase: {e}")
 
 # -----------------------------------------------------------------------------
-# BANCO DE DADOS EM MEMÓRIA (ESTADO DA ELEIÇÃO)
+# BANCO DE DADOS EM MEMÓRIA (ELEIÇÃO E SORTEIO)
 # -----------------------------------------------------------------------------
 dados_eleicao = {
     "ativa": False,
@@ -61,8 +60,18 @@ dados_eleicao = {
     "titulo": "",
     "descricao": "",
     "cargo_id": None,
-    "candidatos": {},  # {user_id: {"nome": str, "proposta": str, "votos": int}}
-    "eleitores_votaram": set()  # IDs dos usuários que já votaram
+    "candidatos": {},
+    "eleitores_votaram": set()
+}
+
+dados_sorteio = {
+    "ativo": False,
+    "titulo": "",
+    "descricao": "",
+    "cargo_id": None,
+    "chesscoins": 0,
+    "qtd_ganhadores": 1,
+    "participantes": set()
 }
 
 @bot.event
@@ -72,13 +81,6 @@ async def on_ready():
     print(f"Logado como: {bot.user.name} (ID: {bot.user.id})")
     print(f"----------------------------------------")
     
-    # Sincroniza a árvore de comandos explicitamente ao ligar
-    try:
-        synced = await bot.tree.sync()
-        print(f"Comandos registrados: {[cmd.name for cmd in synced]}")
-    except Exception as e:
-        print(f"Erro ao sincronizar comandos: {e}")
-
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching, 
@@ -87,355 +89,298 @@ async def on_ready():
     )
 
 # -----------------------------------------------------------------------------
-# FORMULÁRIO (MODAL) PARA CANDIDATURA (/candidatar_se)
+# PAINEL E FORMULÁRIO DE SORTEIO
 # -----------------------------------------------------------------------------
 
-class CandidaturaModal(ui.Modal, title="Formulário de Candidatura"):
-    nome_campanha = ui.TextInput(
-        label="Seu Nome / Nome de Campanha",
-        placeholder="Ex.: Lorenzo",
+class SorteioParticiparView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @ui.button(label="🎉 Entrar no Sorteio", style=discord.ButtonStyle.success, custom_id="btn_entrar_sorteio")
+    async def entrar_sorteio(self, interaction: discord.Interaction, button: ui.Button):
+        if not dados_sorteio["ativo"]:
+            await interaction.response.send_message("❌ Não há nenhum sorteio ativo no momento!", ephemeral=True)
+            return
+
+        user_id = interaction.user.id
+        if user_id in dados_sorteio["participantes"]:
+            await interaction.response.send_message("⚠️ Você já está participando deste sorteio!", ephemeral=True)
+            return
+
+        dados_sorteio["participantes"].add(user_id)
+        qtd = len(dados_sorteio["participantes"])
+        await interaction.response.send_message(f"✅ **Presença confirmada!** Você entrou no sorteio. Total de participantes: `{qtd}`", ephemeral=True)
+
+class CriarSorteioModal(ui.Modal, title="Criar Novo Sorteio"):
+    titulo_sorteio = ui.TextInput(
+        label="Título do Sorteio",
+        placeholder="Ex.: Sorteio Cargo Modo Lento? Nah",
         required=True,
-        max_length=50
+        max_length=100
     )
-    proposta = ui.TextInput(
-        label="Sua Proposta ou Motivo",
+    descricao_sorteio = ui.TextInput(
+        label="Descrição do Sorteio",
         style=discord.TextStyle.paragraph,
-        placeholder="Explique por que os membros devem votar em você...",
+        placeholder="Explique o prêmio, regras e quando será o sorteio...",
         required=True,
         max_length=500
     )
+    cargo_id = ui.TextInput(
+        label="ID do Cargo de Prêmio (Opcional)",
+        placeholder="Ex.: 123456789012345678",
+        required=False,
+        max_length=20
+    )
+    chesscoins = ui.TextInput(
+        label="Prêmio em Chesscoins (Opcional)",
+        placeholder="Ex.: 500",
+        required=False,
+        max_length=10
+    )
+    ganhadores = ui.TextInput(
+        label="Quantidade de Vencedores",
+        placeholder="Padrão: 1",
+        default="1",
+        required=False,
+        max_length=2
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        dados_sorteio["ativo"] = True
+        dados_sorteio["titulo"] = self.titulo_sorteio.value
+        dados_sorteio["descricao"] = self.descricao_sorteio.value
+        
+        c_str = self.cargo_id.value.strip() if self.cargo_id.value else ""
+        dados_sorteio["cargo_id"] = int(c_str) if c_str.isdigit() else None
+
+        coins_str = self.chesscoins.value.strip() if self.chesscoins.value else "0"
+        dados_sorteio["chesscoins"] = int(coins_str) if coins_str.isdigit() else 0
+
+        g_str = self.ganhadores.value.strip() if self.ganhadores.value else "1"
+        dados_sorteio["qtd_ganhadores"] = int(g_str) if g_str.isdigit() and int(g_str) > 0 else 1
+
+        dados_sorteio["participantes"].clear()
+
+        embed = discord.Embed(
+            title=f"🎉 **NOVO SORTEIO:** {dados_sorteio['titulo']}",
+            description=f"{dados_sorteio['descricao']}\n\n👉 **Clique no botão abaixo para participar!**",
+            color=discord.Color.gold()
+        )
+
+        premios = []
+        if dados_sorteio["cargo_id"]:
+            premios.append(f"🎖️ Cargo: <@&{dados_sorteio['cargo_id']}>")
+        if dados_sorteio["chesscoins"] > 0:
+            premios.append(f"🪙 **{dados_sorteio['chesscoins']} Chesscoins**")
+
+        if premios:
+            embed.add_field(name="🎁 Prêmios", value="\n".join(premios), inline=False)
+        embed.add_field(name="👥 Vencedores", value=f"`{dados_sorteio['qtd_ganhadores']}` sortead(os)", inline=True)
+
+        await interaction.response.send_message("✅ **Sorteio publicado com sucesso!**", ephemeral=True)
+        await interaction.channel.send(content="@everyone 🎉 **NOVO SORTEIO NO DISCHESSLORD HUB!**", embed=embed, view=SorteioParticiparView())
+
+class DashboardSorteioView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @ui.button(label="🎁 Criar Sorteio", style=discord.ButtonStyle.primary, custom_id="btn_abrir_sorteio_form")
+    async def abrir_form(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(CriarSorteioModal())
+
+    @ui.button(label="🎲 Realizar Sorteio", style=discord.ButtonStyle.success, custom_id="btn_realizar_sorteio")
+    async def realizar_sorteio(self, interaction: discord.Interaction, button: ui.Button):
+        if not dados_sorteio["ativo"]:
+            await interaction.response.send_message("❌ Não há nenhum sorteio configurado!", ephemeral=True)
+            return
+
+        participantes = list(dados_sorteio["participantes"])
+        if not participantes:
+            await interaction.response.send_message("❌ Ninguém entrou no sorteio ainda!", ephemeral=True)
+            return
+
+        dados_sorteio["ativo"] = False
+        qtd = min(len(participantes), dados_sorteio["qtd_ganhadores"])
+        vencedores_ids = random.sample(participantes, qtd)
+
+        mencoes = []
+        for vid in vencedores_ids:
+            mencoes.append(f"<@{vid}>")
+            # Concede o cargo (se configurado)
+            if dados_sorteio["cargo_id"]:
+                cargo = interaction.guild.get_role(dados_sorteio["cargo_id"])
+                membro = interaction.guild.get_member(vid)
+                if cargo and membro:
+                    try:
+                        await membro.add_role(cargo)
+                    except Exception:
+                        pass
+            # Concede Chesscoins direto no Supabase (se configurado)
+            if dados_sorteio["chesscoins"] > 0:
+                adicionar_chesscoins(vid, dados_sorteio["chesscoins"])
+
+        embed = discord.Embed(
+            title=f"🎊 **RESULTADO DO SORTEIO:** {dados_sorteio['titulo']}",
+            description=f"Parabéns aos vencedores da rodada!\n\n🏆 **Ganhadores:**\n" + "\n".join(mencoes),
+            color=discord.Color.green()
+        )
+
+        if dados_sorteio["chesscoins"] > 0:
+            embed.add_field(name="🪙 Chesscoins", value=f"Cada vencedor recebeu `+{dados_sorteio['chesscoins']}` Chesscoins no banco da nuvem!", inline=False)
+
+        await interaction.response.send_message("🎲 **Sorteio realizado!**", ephemeral=True)
+        await interaction.channel.send(content=f"@everyone 🎊 **TEMOS GANHADORES NO SORTEIO!**", embed=embed)
+
+# -----------------------------------------------------------------------------
+# PAINEL ELEITORAL (MODAL E DASHBOARD)
+# -----------------------------------------------------------------------------
+
+class CandidaturaModal(ui.Modal, title="Formulário de Candidatura"):
+    nome_campanha = ui.TextInput(label="Seu Nome / Nome de Campanha", placeholder="Ex.: Lorenzo", required=True, max_length=50)
+    proposta = ui.TextInput(label="Sua Proposta ou Motivo", style=discord.TextStyle.paragraph, placeholder="Explique por que devem votar em você...", required=True, max_length=500)
 
     async def on_submit(self, interaction: discord.Interaction):
         user_id = interaction.user.id
-        
-        if not dados_eleicao["ativa"]:
-            await interaction.response.send_message("❌ **Erro:** Não há nenhuma eleição aberta no momento!", ephemeral=True)
+        if not dados_eleicao["ativa"] or dados_eleicao["votacao_aberta"]:
+            await interaction.response.send_message("❌ Inscrições indisponíveis no momento!", ephemeral=True)
             return
 
-        if dados_eleicao["votacao_aberta"]:
-            await interaction.response.send_message("❌ **Erro:** As candidaturas já foram encerradas pois a votação está em andamento!", ephemeral=True)
-            return
-
-        # Registra ou atualiza o candidato
-        dados_eleicao["candidatos"][user_id] = {
-            "nome": self.nome_campanha.value,
-            "proposta": self.proposta.value,
-            "votos": 0
-        }
-
-        embed = discord.Embed(
-            title="✅ Candidatura Registrada com Sucesso!",
-            description=f"**Candidato:** {interaction.user.mention} (`{self.nome_campanha.value}`)\n**Proposta:** {self.proposta.value}",
-            color=discord.Color.green()
-        )
+        dados_eleicao["candidatos"][user_id] = {"nome": self.nome_campanha.value, "proposta": self.proposta.value, "votos": 0}
+        embed = discord.Embed(title="✅ Candidatura Registrada!", description=f"**Candidato:** {interaction.user.mention} (`{self.nome_campanha.value}`)\n**Proposta:** {self.proposta.value}", color=discord.Color.green())
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# -----------------------------------------------------------------------------
-# COMPONENTES DE VOTAÇÃO (/votar)
-# -----------------------------------------------------------------------------
 
 class VotacaoSelect(ui.Select):
     def __init__(self):
-        options = []
-        for cid, info in dados_eleicao["candidatos"].items():
-            options.append(discord.SelectOption(
-                label=info['nome'],
-                value=str(cid),
-                description=f"Proposta: {info['proposta'][:50]}..."
-            ))
-
-        super().__init__(
-            placeholder="Selecione seu candidato na lista...",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
+        options = [discord.SelectOption(label=info['nome'], value=str(cid), description=f"Proposta: {info['proposta'][:50]}...") for cid, info in dados_eleicao["candidatos"].items()]
+        super().__init__(placeholder="Selecione seu candidato na lista...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         user_id = interaction.user.id
-
         if user_id in dados_eleicao["eleitores_votaram"]:
-            await interaction.response.send_message("❌ **Acesso Negado:** Você já registrou o seu voto nesta eleição!", ephemeral=True)
+            await interaction.response.send_message("❌ Você já votou nesta eleição!", ephemeral=True)
             return
 
         candidato_id = int(self.values[0])
         dados_eleicao["candidatos"][candidato_id]["votos"] += 1
         dados_eleicao["eleitores_votaram"].add(user_id)
-
-        nome_candidato = dados_eleicao["candidatos"][candidato_id]["nome"]
-        await interaction.response.send_message(
-            f"🗳️ **Voto Confirmado!** Você votou com sucesso em **{nome_candidato}**. Seu voto é secreto!",
-            ephemeral=True
-        )
+        await interaction.response.send_message(f"🗳️ **Voto registrado em {dados_eleicao['candidatos'][candidato_id]['nome']}!** (Secreto)", ephemeral=True)
 
 class VotacaoView(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(VotacaoSelect())
 
-# -----------------------------------------------------------------------------
-# FORMULÁRIO (MODAL) PARA CRIAR ELEIÇÃO
-# -----------------------------------------------------------------------------
-
 class CriarEleicaoModal(ui.Modal, title="Criar Nova Eleição"):
-    titulo_eleicao = ui.TextInput(
-        label="Título da Eleição",
-        placeholder="Ex.: Eleição para Moderador 2026",
-        required=True,
-        max_length=100
-    )
-    descricao_eleicao = ui.TextInput(
-        label="Descrição da Eleição",
-        style=discord.TextStyle.paragraph,
-        placeholder="Descreva as regras ou observações...",
-        required=True,
-        max_length=1000
-    )
-    cargo_id = ui.TextInput(
-        label="ID do Cargo a ser Concedido (Opcional)",
-        placeholder="Ex.: 123456789012345678",
-        required=False,
-        max_length=20
-    )
+    titulo_eleicao = ui.TextInput(label="Título da Eleição", placeholder="Ex.: Eleição para Moderador 2026", required=True, max_length=100)
+    descricao_eleicao = ui.TextInput(label="Descrição da Eleição", style=discord.TextStyle.paragraph, placeholder="Descreva as regras...", required=True, max_length=1000)
+    cargo_id = ui.TextInput(label="ID do Cargo a Conceder (Opcional)", placeholder="Ex.: 123456789012345678", required=False, max_length=20)
 
     async def on_submit(self, interaction: discord.Interaction):
         dados_eleicao["ativa"] = True
         dados_eleicao["votacao_aberta"] = False
         dados_eleicao["titulo"] = self.titulo_eleicao.value
         dados_eleicao["descricao"] = self.descricao_eleicao.value
-        
-        cargo_str = self.cargo_id.value.strip() if self.cargo_id.value else ""
-        dados_eleicao["cargo_id"] = int(cargo_str) if cargo_str.isdigit() else None
-        
+        c_str = self.cargo_id.value.strip() if self.cargo_id.value else ""
+        dados_eleicao["cargo_id"] = int(c_str) if c_str.isdigit() else None
         dados_eleicao["candidatos"].clear()
         dados_eleicao["eleitores_votaram"].clear()
 
         embed = discord.Embed(
-            title=f"🗳️ **NOVA ELEIÇÃO CONFIGURADA:** {dados_eleicao['titulo']}",
-            description=(
-                f"{dados_eleicao['descricao']}\n\n"
-                f"📌 **Status:** Inscrições abertas para candidatos!\n"
-                f"👉 Use o comando `/candidatar_se` para registrar sua candidatura."
-            ),
+            title=f"🗳️ **NOVA ELEIÇÃO:** {dados_eleicao['titulo']}",
+            description=f"{dados_eleicao['descricao']}\n\n👉 Use **/candidatar_se** para se inscrever!",
             color=discord.Color.blue()
         )
-        if dados_eleicao["cargo_id"]:
-            embed.add_field(name="🏆 Cargo em Disputa", value=f"<@&{dados_eleicao['cargo_id']}>", inline=False)
-
-        await interaction.response.send_message("✅ **Eleição configurada com sucesso!**", ephemeral=True)
+        await interaction.response.send_message("✅ **Eleição criada com sucesso!**", ephemeral=True)
         await interaction.channel.send(content="@everyone Nova eleição configurada!", embed=embed)
-
-# -----------------------------------------------------------------------------
-# PAINEL DE CONTROLE DE ELEIÇÃO (DASHBOARD EFÊMERO)
-# -----------------------------------------------------------------------------
 
 class DashboardEleicaoView(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @ui.button(label="📝 Nova Eleição", style=discord.ButtonStyle.primary, custom_id="btn_abrir_form")
-    async def abrir_formulario(self, interaction: discord.Interaction, button: ui.Button):
+    async def abrir_form(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(CriarEleicaoModal())
 
     @ui.button(label="🚀 Iniciar Votação", style=discord.ButtonStyle.success, custom_id="btn_iniciar_votacao")
     async def iniciar_votacao(self, interaction: discord.Interaction, button: ui.Button):
-        if not dados_eleicao["ativa"]:
-            await interaction.response.send_message("❌ Crie uma eleição primeiro!", ephemeral=True)
-            return
-
-        if not dados_eleicao["candidatos"]:
-            await interaction.response.send_message("❌ Não é possível iniciar sem nenhum candidato inscrito!", ephemeral=True)
+        if not dados_eleicao["ativa"] or not dados_eleicao["candidatos"]:
+            await interaction.response.send_message("❌ Crie a eleição e aguarde candidatos inscritos!", ephemeral=True)
             return
 
         dados_eleicao["votacao_aberta"] = True
-        
-        embed = discord.Embed(
-            title=f"🗳️ **VOTAÇÃO ABERTA:** {dados_eleicao['titulo']}",
-            description=(
-                f"{dados_eleicao['descricao']}\n\n"
-                f"🚨 **A urna eletrônica está oficialmente aberta!**\n\n"
-                f"👉 Digite **/votar** no chat para escolher seu candidato e registrar seu voto com segurança."
-            ),
-            color=discord.Color.green()
-        )
-        
-        lista_candidatos = "\n".join([f"• **{info['nome']}** (<@{cid}>)" for cid, info in dados_eleicao["candidatos"].items()])
-        embed.add_field(name="📋 Candidatos Concorrentes", value=lista_candidatos, inline=False)
-
-        await interaction.response.send_message("🚀 **Votação iniciada publicamente!**", ephemeral=True)
-        await interaction.channel.send(content="@everyone 🚨 **ATENÇÃO! A VOTAÇÃO FOI INICIADA!** Digitem `/votar` para participar!", embed=embed)
+        embed = discord.Embed(title=f"🗳️ **VOTAÇÃO ABERTA:** {dados_eleicao['titulo']}", description=f"👉 Digite **/votar** para votar!", color=discord.Color.green())
+        await interaction.response.send_message("🚀 **Votação iniciada!**", ephemeral=True)
+        await interaction.channel.send(content="@everyone 🚨 **VOTAÇÃO ABERTA!** Use `/votar`!", embed=embed)
 
     @ui.button(label="🛑 Encerrar Votação", style=discord.ButtonStyle.danger, custom_id="btn_encerrar_votacao")
     async def encerrar_votacao(self, interaction: discord.Interaction, button: ui.Button):
         if not dados_eleicao["ativa"] or not dados_eleicao["votacao_aberta"]:
-            await interaction.response.send_message("❌ Nenhuma votação está em andamento para ser encerrada!", ephemeral=True)
+            await interaction.response.send_message("❌ Nenhuma votação ativa para encerrar!", ephemeral=True)
             return
 
         dados_eleicao["votacao_aberta"] = False
         dados_eleicao["ativa"] = False
-
         candidatos = dados_eleicao["candidatos"]
         vencedor_id = max(candidatos, key=lambda cid: candidatos[cid]["votos"])
-        vencedor_info = candidatos[vencedor_id]
 
-        embed = discord.Embed(
-            title=f"🏆 **RESULTADO FINAL DA ELEIÇÃO:** {dados_eleicao['titulo']}",
-            description=f"A urna eletrônica foi encerrada! Confira a contagem dos votos:",
-            color=discord.Color.gold()
-        )
+        embed = discord.Embed(title=f"🏆 **RESULTADO FINAL:** {dados_eleicao['titulo']}", color=discord.Color.gold())
+        embed.add_field(name="🎉 VENCEDOR", value=f"🥇 <@{vencedor_id}> com {candidatos[vencedor_id]['votos']} votos!", inline=False)
 
-        for cid, info in candidatos.items():
-            embed.add_field(
-                name=f"Candidato: {info['nome']}",
-                value=f"🗳️ **{info['votos']} voto(s)**",
-                inline=True
-            )
-
-        embed.add_field(
-            name="🎉 GRANDIOSO VENCEDOR",
-            value=f"🥇 <@{vencedor_id}> (`{vencedor_info['nome']}`) com **{vencedor_info['votos']} votos**!",
-            inline=False
-        )
-
-        mensagem_cargo = ""
         if dados_eleicao["cargo_id"]:
             cargo = interaction.guild.get_role(dados_eleicao["cargo_id"])
             membro = interaction.guild.get_member(vencedor_id)
             if cargo and membro:
                 try:
                     await membro.add_role(cargo)
-                    mensagem_cargo = f"\n🎖️ O cargo {cargo.mention} foi atribuído automaticamente a <@{vencedor_id}>!"
-                except Exception as e:
-                    mensagem_cargo = f"\n⚠️ Não foi possível atribuir o cargo automaticamente (verifique as permissões do bot)."
+                except Exception:
+                    pass
 
-        if mensagem_cargo:
-            embed.add_field(name="Cargo Entregue", value=mensagem_cargo, inline=False)
-
-        await interaction.response.send_message("🛑 **Votação encerrada com sucesso!**", ephemeral=True)
-        await interaction.channel.send(content=f"@everyone 🛑 **VOTAÇÃO ENCERRADA!** Confira o resultado final abaixo:", embed=embed)
-
-# -----------------------------------------------------------------------------
-# SISTEMA DE SORTEIO DE CHESSCOINS (/sorteio)
-# -----------------------------------------------------------------------------
-
-class SorteioModal(ui.Modal, title="Criar Sorteio de Chesscoins"):
-    titulo = ui.TextInput(label="Título do Sorteio", placeholder="Ex: Sorteio de 500 Chesscoins!")
-    premio = ui.TextInput(label="Valor do Prêmio (Chesscoins)", placeholder="100", default="100")
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            valor = int(self.premio.value)
-        except ValueError:
-            await interaction.response.send_message("O valor do prêmio precisa ser um número inteiro!", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title=f"🎉 {self.titulo.value}",
-            description=f"**Prêmio:** {valor} 🪙 Chesscoins\nClique no botão abaixo para participar!",
-            color=discord.Color.gold()
-        )
-        view = SorteioView(valor_premio=valor)
-        await interaction.response.send_message(embed=embed, view=view)
-
-class SorteioView(ui.View):
-    def __init__(self, valor_premio: int):
-        super().__init__(timeout=None)
-        self.valor_premio = valor_premio
-        self.participantes = set()
-
-    @ui.button(label="Participar 🎟️", style=discord.ButtonStyle.success)
-    async def entrar(self, interaction: discord.Interaction, button: ui.Button):
-        if interaction.user.id in self.participantes:
-            await interaction.response.send_message("Você já está participando deste sorteio!", ephemeral=True)
-        else:
-            self.participantes.add(interaction.user.id)
-            await interaction.response.send_message("Você entrou no sorteio com sucesso!", ephemeral=True)
-
-    @ui.button(label="Encerrar Sorteio 🏆", style=discord.ButtonStyle.danger)
-    async def encerrar(self, interaction: discord.Interaction, button: ui.Button):
-        e_dono = interaction.user.id == interaction.guild.owner_id
-        e_adm = interaction.user.guild_permissions.administrator
-        if not (e_dono or e_adm):
-            await interaction.response.send_message("Apenas administradores podem encerrar o sorteio.", ephemeral=True)
-            return
-
-        if not self.participantes:
-            await interaction.response.send_message("Ninguém participou do sorteio!", ephemeral=True)
-            return
-
-        ganhador_id = random.choice(list(self.participantes))
-        ganhador = interaction.guild.get_member(ganhador_id)
-
-        adicionar_chesscoins(ganhador_id, self.valor_premio)
-
-        await interaction.response.send_message(
-            f"🎉 **Sorteio Encerrado!**\nParabéns {ganhador.mention}! Você ganhou **{self.valor_premio} 🪙 Chesscoins**!"
-        )
-        self.stop()
+        await interaction.response.send_message("🛑 **Encerrado!**", ephemeral=True)
+        await interaction.channel.send(content="@everyone 🛑 **VOTAÇÃO ENCERRADA!**", embed=embed)
 
 # -----------------------------------------------------------------------------
 # COMANDOS DE BARRA (SLASH COMMANDS)
 # -----------------------------------------------------------------------------
 
-@bot.tree.command(name="criar_eleicao", description="Abre o painel de gerenciamento de eleições (Apenas ADM/Dono).")
+def checar_adm(interaction: discord.Interaction):
+    return interaction.user.id == interaction.guild.owner_id or interaction.user.guild_permissions.administrator
+
+@bot.tree.command(name="criar_eleicao", description="Painel de gerenciamento de eleições (Apenas ADM).")
 async def criar_eleicao(interaction: discord.Interaction):
-    e_dono = interaction.user.id == interaction.guild.owner_id
-    e_adm = interaction.user.guild_permissions.administrator
-
-    if not (e_dono or e_adm):
-        await interaction.response.send_message("❌ **Acesso Negado!** Apenas Administradores ou o Criador podem usar este comando.", ephemeral=True)
+    if not checar_adm(interaction):
+        await interaction.response.send_message("❌ Acesso Negado!", ephemeral=True)
         return
-
-    embed = discord.Embed(
-        title="🗳️ **UrnaBot — Painel de Controle Eleitoral**",
-        description="Painel Administrativo do **Dischesslord Hub**.\nUse os botões abaixo para gerenciar a eleição.",
-        color=discord.Color.blue()
-    )
+    embed = discord.Embed(title="🗳️ **UrnaBot — Painel Eleitoral**", color=discord.Color.blue())
     await interaction.response.send_message(embed=embed, view=DashboardEleicaoView(), ephemeral=True)
+
+@bot.tree.command(name="sorteio", description="Painel de gerenciamento de sorteios (Apenas ADM).")
+async def sorteio(interaction: discord.Interaction):
+    if not checar_adm(interaction):
+        await interaction.response.send_message("❌ Acesso Negado!", ephemeral=True)
+        return
+    embed = discord.Embed(
+        title="🎁 **UrnaBot — Painel de Sorteios**",
+        description="Clique em **Criar Sorteio** para abrir o formulário e configurar o prêmio (Cargo e/ou Chesscoins).",
+        color=discord.Color.gold()
+    )
+    await interaction.response.send_message(embed=embed, view=DashboardSorteioView(), ephemeral=True)
 
 @bot.tree.command(name="candidatar_se", description="Inscreva-se como candidato na eleição ativa.")
 async def candidatar_se(interaction: discord.Interaction):
-    if not dados_eleicao["ativa"]:
-        await interaction.response.send_message("❌ Não há nenhuma eleição com inscrições abertas no momento!", ephemeral=True)
-        return
-
-    if dados_eleicao["votacao_aberta"]:
-        await interaction.response.send_message("❌ As candidaturas já foram encerradas!", ephemeral=True)
-        return
-
     await interaction.response.send_modal(CandidaturaModal())
 
-@bot.tree.command(name="votar", description="Abra a urna secreta para votar em um candidato.")
+@bot.tree.command(name="votar", description="Abra a urna secreta para votar.")
 async def votar(interaction: discord.Interaction):
     if not dados_eleicao["ativa"] or not dados_eleicao["votacao_aberta"]:
-        await interaction.response.send_message("❌ Não há nenhuma votação aberta no momento!", ephemeral=True)
+        await interaction.response.send_message("❌ Nenhuma votação aberta!", ephemeral=True)
         return
-
-    if interaction.user.id in dados_eleicao["eleitores_votaram"]:
-        await interaction.response.send_message("❌ Você já registrou seu voto nesta eleição!", ephemeral=True)
-        return
-
-    if not dados_eleicao["candidatos"]:
-        await interaction.response.send_message("❌ Nenhum candidato encontrado para esta votação.", ephemeral=True)
-        return
-
-    embed = discord.Embed(
-        title="🗳️ **Urna Eletrônica — Cabine Secreta**",
-        description="Escolha seu candidato no menu suspenso abaixo para confirmar seu voto:",
-        color=discord.Color.gold()
-    )
+    embed = discord.Embed(title="🗳️ **Urna Secreta**", description="Escolha seu candidato:", color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, view=VotacaoView(), ephemeral=True)
 
-@bot.tree.command(name="sorteio", description="Abre o painel para criar um sorteio de Chesscoins.")
-async def sorteio(interaction: discord.Interaction):
-    e_dono = interaction.user.id == interaction.guild.owner_id
-    e_adm = interaction.user.guild_permissions.administrator
-
-    if not (e_dono or e_adm):
-        await interaction.response.send_message("❌ **Acesso Negado!** Apenas Administradores ou o Criador podem usar este comando.", ephemeral=True)
-        return
-
-    await interaction.response.send_modal(SorteioModal())
+@bot.tree.command(name="saldo", description="Veja seu saldo de Chesscoins.")
+async def saldo(interaction: discord.Interaction):
+    qtd = obter_chesscoins(interaction.user.id)
+    await interaction.response.send_message(f"🪙 **{interaction.user.display_name}**, você possui **{qtd} Chesscoins** no banco global!", ephemeral=True)
 
 # -----------------------------------------------------------------------------
 # INICIALIZAÇÃO

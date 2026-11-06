@@ -13,8 +13,9 @@ class UrnaBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        await self.tree.sync()
-        print("Comandos de barra (slash commands) sincronizados com sucesso!")
+        # Sincroniza instantaneamente todos os comandos na árvore global do bot
+        commands_synced = await self.tree.sync()
+        print(f"✅ Sincronizados {len(commands_synced)} comandos de barra globalmente!")
 
 bot = UrnaBot()
 
@@ -38,6 +39,13 @@ async def on_ready():
     print(f"Logado como: {bot.user.name} (ID: {bot.user.id})")
     print(f"----------------------------------------")
     
+    # Sincroniza a árvore de comandos explicitamente ao ligar
+    try:
+        synced = await bot.tree.sync()
+        print(f"Comandos registrados: {[cmd.name for cmd in synced]}")
+    except Exception as e:
+        print(f"Erro ao sincronizar comandos: {e}")
+
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching, 
@@ -163,7 +171,6 @@ class CriarEleicaoModal(ui.Modal, title="Criar Nova Eleição"):
         dados_eleicao["titulo"] = self.titulo_eleicao.value
         dados_eleicao["descricao"] = self.descricao_eleicao.value
         
-        # Trata o ID do cargo
         cargo_str = self.cargo_id.value.strip() if self.cargo_id.value else ""
         dados_eleicao["cargo_id"] = int(cargo_str) if cargo_str.isdigit() else None
         
@@ -175,7 +182,7 @@ class CriarEleicaoModal(ui.Modal, title="Criar Nova Eleição"):
             description=(
                 f"{dados_eleicao['descricao']}\n\n"
                 f"📌 **Status:** Inscrições abertas para candidatos!\n"
-                f"👉 Use o comando `/candidatar-se` para registrar sua candidatura."
+                f"👉 Use o comando `/candidatar_se` para registrar sua candidatura."
             ),
             color=discord.Color.blue()
         )
@@ -219,7 +226,6 @@ class DashboardEleicaoView(ui.View):
             color=discord.Color.green()
         )
         
-        # Lista os candidatos inscritos no anúncio público
         lista_candidatos = "\n".join([f"• **{info['nome']}** (<@{cid}>)" for cid, info in dados_eleicao["candidatos"].items()])
         embed.add_field(name="📋 Candidatos Concorrentes", value=lista_candidatos, inline=False)
 
@@ -235,7 +241,6 @@ class DashboardEleicaoView(ui.View):
         dados_eleicao["votacao_aberta"] = False
         dados_eleicao["ativa"] = False
 
-        # Apuração dos votos
         candidatos = dados_eleicao["candidatos"]
         vencedor_id = max(candidatos, key=lambda cid: candidatos[cid]["votos"])
         vencedor_info = candidatos[vencedor_id]
@@ -259,7 +264,6 @@ class DashboardEleicaoView(ui.View):
             inline=False
         )
 
-        # Entrega automática do cargo ao vencedor (se configurado)
         mensagem_cargo = ""
         if dados_eleicao["cargo_id"]:
             cargo = interaction.guild.get_role(dados_eleicao["cargo_id"])
@@ -297,7 +301,7 @@ async def criar_eleicao(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed, view=DashboardEleicaoView(), ephemeral=True)
 
-@bot.tree.command(name="candidatar-se", description="Inscreva-se como candidato na eleição ativa.")
+@bot.tree.command(name="candidatar_se", description="Inscreva-se como candidato na eleição ativa.")
 async def candidatar_se(interaction: discord.Interaction):
     if not dados_eleicao["ativa"]:
         await interaction.response.send_message("❌ Não há nenhuma eleição com inscrições abertas no momento!", ephemeral=True)

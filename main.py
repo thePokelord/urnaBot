@@ -180,7 +180,7 @@ class DashboardSorteioView(ui.View):
 # -----------------------------------------------------------------------------
 
 class CandidaturaModal(ui.Modal, title="Formulário de Candidatura"):
-    nome_campanha = ui.TextInput(label="Seu Nome / Nome de Campanha", placeholder="Ex.: Lorenzo", required=True, max_length=50)
+    nome_campanha = ui.TextInput(label="Seu Nome / Nome de Campanha", placeholder="Ex.: danilo", required=True, max_length=50)
     proposta = ui.TextInput(label="Sua Proposta ou Motivo", style=discord.TextStyle.paragraph, placeholder="Explique por que devem votar em você...", required=True, max_length=500)
 
     async def on_submit(self, interaction: discord.Interaction):
